@@ -1,0 +1,27 @@
+{
+  "name": "dbdraw",
+  "version": "1.0.0",
+  "main": "main.js",
+  "bin": {
+    "dbdraw": "main.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mrudulkolambe/dbdraw-cli"
+  },
+  "type": "module",
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "A CLI tool to seamlessly generate and manage MongoDB schemas in Node.js using visual database designs created on [dbdraw](https://dbdraw.vercel.app).",
+  "dependencies": {
+    "@clack/prompts": "^0.9.1",
+    "chalk": "^5.4.1",
+    "commander": "^13.0.0",
+    "is-online": "^11.0.0",
+    "keytar": "^7.9.0",
+    "moment": "^2.30.1",
+    "node-fetch": "^3.3.2",
+    "ora": "^8.1.1"
+  }
+}
