@@ -39,10 +39,18 @@ const verifyToken = async (token) => {
 
     if (!response.ok) {
       spinner.fail('Token verification failed.');
+      await deleteToken(); // Automatically delete the token if verification fails
       throw new Error(`${response.statusText}`);
     }
 
     const data = await response.json();
+    
+    if (!data.valid) {
+      spinner.fail('Token is invalid or revoked.');
+      await deleteToken(); // Automatically delete the token if it's invalid
+      throw new Error('Invalid or revoked token');
+    }
+    
     spinner.succeed('Token verified successfully.');
     return data;
   } catch (error) {
@@ -56,24 +64,37 @@ const authenticationFlow = async () => {
   const existingToken = await loadToken();
 
   if (existingToken) {
-    console.log(chalk.blue(`You are already authenticated.`));
+    try {
+      // Verify if the existing token is still valid
+      const online = await isOnline();
+      if (online) {
+        const data = await verifyToken(existingToken);
+        if (data.valid) {
+          console.log(chalk.blue(`You are already authenticated as ${data.user.username}.`));
+          
+          const logout = await confirm({
+            message: 'Do you want to log out?',
+          });
 
-    const logout = await confirm({
-      message: 'Do you want to log out?',
-    });
+          if (isCancel(logout)) {
+            outro(chalk.yellow('Operation canceled.'));
+            process.exit(0);
+          }
 
-    if (isCancel(logout)) {
-      outro(chalk.yellow('Operation canceled.'));
-      process.exit(0);
-    }
-
-    if (logout) {
-      await deleteToken();
-      outro(chalk.green('You have been logged out.'));
-      process.exit(0);
-    } else {
-      outro(chalk.blue('You are still logged in.'));
-      process.exit(0);
+          if (logout) {
+            await deleteToken();
+            outro(chalk.green('You have been logged out.'));
+            process.exit(0);
+          } else {
+            outro(chalk.blue('You are still logged in.'));
+            process.exit(0);
+          }
+        }
+      }
+    } catch (error) {
+      // Token verification failed, it's already been deleted in verifyToken
+      console.log(chalk.red('Your previous session has expired. Please log in again.'));
+      // Continue to login flow
     }
   }
 
@@ -192,27 +213,31 @@ const saveConfigFile = async (project) => {
   }
 
   const language = languageChoice === 'typescript' ? true : false;
+  let moduleType = 'module'; // Default to ES Module for TypeScript
 
-  const moduleTypeChoice = await select({
-    message: 'Choose the module system:',
-    options: [
-      { value: 'commonjs', label: 'CommonJS' },
-      { value: 'module', label: 'ES Module' },
-    ],
-    required: true,
-  });
+  // Only ask for module type if JavaScript is selected
+  if (languageChoice === 'javascript') {
+    const moduleTypeChoice = await select({
+      message: 'Choose the module system:',
+      options: [
+        { value: 'commonjs', label: 'CommonJS' },
+        { value: 'module', label: 'ES Module' },
+      ],
+      required: true,
+    });
 
-  if (isCancel(moduleTypeChoice)) {
-    outro(chalk.yellow('Operation canceled.'));
-    return;
+    if (isCancel(moduleTypeChoice)) {
+      outro(chalk.yellow('Operation canceled.'));
+      return;
+    }
+
+    moduleType = moduleTypeChoice;
   }
-
-  const moduleType = moduleTypeChoice === 'commonjs' ? 'commonjs' : 'module';
 
   const configData = {
     projectID: `prj-${project._id}`,
     path: savePath,
-    language: language,
+    language: languageChoice,
     type: moduleType,
     updatedAt: Date.now(),
   };
@@ -273,6 +298,7 @@ program
       process.exit(1);
     }
   });
+
 function convertJsonToCollectionsFormat(json) {
   try {
     const { edges, nodes } = json;
@@ -318,7 +344,44 @@ function convertJsonToCollectionsFormat(json) {
   }
 }
 
-function generateSchemas(collections, type = "all") {
+function generateTypeScriptInterfaces(collections) {
+  return collections.map(collection => {
+    const pascalName = toPascalCase(collection.collectionName);
+    const fields = collection.fields
+      .filter(field => field.name !== "_id")
+      .map(field => {
+        let typeStr = '';
+        switch (field.type.toLowerCase()) {
+          case 'string':
+            typeStr = 'string';
+            break;
+          case 'number':
+            typeStr = 'number';
+            break;
+          case 'boolean':
+            typeStr = 'boolean';
+            break;
+          case 'date':
+            typeStr = 'Date';
+            break;
+          case 'ref':
+            typeStr = field.ref ? `Types.ObjectId | ${toPascalCase(field.ref)}` : 'Types.ObjectId';
+            break;
+          default:
+            typeStr = 'any';
+        }
+        if (field.list) typeStr = `${typeStr}[]`;
+        return `  ${field.name}${field.required ? '' : '?'}: ${typeStr};`;
+      })
+      .join('\n');
+
+    return `interface ${pascalName} extends Document {
+${fields}
+}`;
+  }).join('\n\n');
+}
+
+function generateSchemas(collections, type = "all", language = "javascript") {
   const schemas = collections
     .filter((item) => {
       if (type === "all") {
@@ -329,8 +392,22 @@ function generateSchemas(collections, type = "all") {
     });
 
   if (schemas.length > 0) {
+    // Handle TypeScript vs JavaScript imports and interfaces
+    let imports = language === 'typescript'
+      ? 'import mongoose, { Document, Schema, Types } from "mongoose";\n\n'
+      : 'const mongoose = require(\'mongoose\');\n\n';
+
+    let interfaces = '';
+    if (language === 'typescript') {
+      interfaces = generateTypeScriptInterfaces(schemas) + '\n\n';
+    }
+
     let generatedSchema = schemas.map((collection) => {
       const pascalCaseCollectionName = toPascalCase(collection.collectionName);
+      const schemaName = language === 'typescript'
+        ? `Schema<${pascalCaseCollectionName}>`
+        : 'mongoose.Schema';
+      
       const fieldDefinitions = collection.fields
         .filter((field) => field.name !== "_id")
         .map((field) => {
@@ -338,7 +415,7 @@ function generateSchemas(collections, type = "all") {
 
           if (field.type === "ref" && field.ref) {
             fieldOptions.push(
-              `type: mongoose.Schema.Types.ObjectId`,
+              `type: ${language === 'typescript' ? 'Schema.Types.ObjectId' : 'mongoose.Schema.Types.ObjectId'}`,
               `ref: "${field.ref}"`,
               field.required ? `required: true` : ""
             );
@@ -348,23 +425,31 @@ function generateSchemas(collections, type = "all") {
             if (field.unique) fieldOptions.push(`unique: true`);
             if (field.default !== undefined)
               fieldOptions.push(`default: ${JSON.stringify(field.default)}`);
+            if (field.list) fieldOptions.push(`array: true`);
           }
 
-          return `\t\t${field.name}: { ${fieldOptions.filter(Boolean).join(", ")} }`;
+          return `  ${field.name}: { ${fieldOptions.filter(Boolean).join(", ")} }`;
         });
 
       if (fieldDefinitions.length === 0) return "";
 
-      return `
-  const ${pascalCaseCollectionName}Schema = new mongoose.Schema({
-  ${fieldDefinitions.join(",\n")}
-  });
+      const modelType = language === 'typescript'
+        ? `mongoose.Model<${pascalCaseCollectionName}>`
+        : '';
+
+      const exportStatement = language === 'typescript'
+        ? `export const ${pascalCaseCollectionName}${modelType ? `: ${modelType}` : ''} = mongoose.model${language === 'typescript' ? `<${pascalCaseCollectionName}>` : ''}("${collection.collectionName.toLowerCase()}", ${pascalCaseCollectionName}Schema);`
+        : `module.exports = mongoose.model("${collection.collectionName.toLowerCase()}", ${pascalCaseCollectionName}Schema);`;
+
+      return `const ${pascalCaseCollectionName}Schema = new ${language === 'typescript' ? 'Schema' : 'mongoose.Schema'}({
+${fieldDefinitions.join(",\n")}
+});
       
-  module.exports = mongoose.model("${collection.collectionName.toLowerCase()}", ${pascalCaseCollectionName}Schema);
+${exportStatement}
         `;
     }).filter(Boolean).join("\n");
 
-    return `const mongoose = require('mongoose');\n\n${generatedSchema}`;
+    return `${imports}${interfaces}${generatedSchema}`;
   } else {
     return null;
   }
@@ -393,7 +478,7 @@ function toPascalCase(str) {
     .replace(/[_\s]/g, '');
 }
 
-const saveSchemas = async (collections, savePath, selectedModels) => {
+const saveSchemas = async (collections, savePath, selectedModels, language = "javascript") => {
   const modelsDir = path.resolve(savePath);
   if (!fs.existsSync(modelsDir)) {
     fs.mkdirSync(modelsDir, { recursive: true });
@@ -401,9 +486,10 @@ const saveSchemas = async (collections, savePath, selectedModels) => {
 
   collections.forEach((collection) => {
     if (selectedModels.includes('all') || selectedModels.includes(collection.collectionName)) {
-      const schemasCode = generateSchemas([collection], 'all');
+      const schemasCode = generateSchemas([collection], 'all', language);
       if (schemasCode) {
-        const fileName = `${toPascalCase(collection.collectionName)}.js`;
+        const fileExtension = language === 'typescript' ? '.ts' : '.js';
+        const fileName = `${toPascalCase(collection.collectionName)}${fileExtension}`;
         const filePath = path.join(modelsDir, fileName);
         fs.writeFileSync(filePath, schemasCode, 'utf8');
       } else {
@@ -411,7 +497,6 @@ const saveSchemas = async (collections, savePath, selectedModels) => {
       }
     }
   });
-
 };
 
 program
@@ -433,7 +518,8 @@ program
       }
 
       const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-      const { projectID, savePath = './models' } = config;
+      const { projectID, path: configPath2 = './models', language = 'javascript' } = config;
+      const savePath = configPath2;
 
       const isValidProjectId = typeof projectID === 'string' && projectID.startsWith('prj-') && projectID.length === 28;
 
@@ -466,9 +552,12 @@ program
         const collections = convertJsonToCollectionsFormat(flowData);
 
         if (!collections) {
-          console.log(chalk.red('Failed to generate collections from the flow data.'));
+          spinner.fail(chalk.red('Failed to generate collections from the flow data.'));
           process.exit(1);
         }
+
+        // Stop the spinner before showing the multiselect prompt
+        spinner.stop();
 
         const availableModels = collections.map((collection) => collection.collectionName);
         const selectedModels = await multiselect({
@@ -485,9 +574,15 @@ program
           return;
         }
 
+        // Restart the spinner for the file operations
+        spinner.start('Generating schema files...');
+
         const modelsDir = path.resolve(savePath);
 
         if (fs.existsSync(modelsDir)) {
+          // Stop spinner for user interaction
+          spinner.stop();
+          
           const overwrite = await confirm({
             message: 'Target folder already exists. Do you want to overwrite it?',
           });
@@ -501,9 +596,12 @@ program
             outro(chalk.yellow('Operation canceled.'));
             return;
           }
+          
+          // Restart spinner after user interaction
+          spinner.start('Generating schema files...');
         }
 
-        await saveSchemas(collections, savePath, selectedModels);
+        await saveSchemas(collections, savePath, selectedModels, language);
         spinner.succeed(chalk.green(`Project synced successfully: ${data.project.title}`));
       } else {
         spinner.fail(chalk.red(data.message));
@@ -514,7 +612,5 @@ program
       process.exit(1);
     }
   });
-
-
 
 program.parse(process.argv);
