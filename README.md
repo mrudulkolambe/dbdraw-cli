@@ -19,6 +19,27 @@ Install the DBDraw CLI globally using npm:
 npm install -g dbdraw
 ```
 
+## Project Structure
+
+The DBDraw CLI is organized with a modular architecture:
+
+```
+dbdraw-cli/
+├── src/                    # Source code directory
+│   ├── commands/           # CLI command definitions
+│   │   ├── login.js        # Login command implementation
+│   │   ├── link.js         # Link command implementation
+│   │   ├── sync.js         # Sync command implementation
+│   │   └── index.js        # Command exports
+│   ├── services/           # Core service modules
+│   │   ├── auth.js         # Authentication service
+│   │   ├── project.js      # Project management service
+│   │   └── schema.js       # Schema generation service
+│   ├── utils/              # Utility functions
+│   │   └── constants.js    # Shared constants
+│   └── index.js            # Main entry point
+└── package.json            # Project configuration
+```
 
 ## Features
 
@@ -85,4 +106,3 @@ Once everything is configured, sync your local project to download the schemas g
 
 ```bash
 dbdraw sync
-```
